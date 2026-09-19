@@ -270,6 +270,22 @@ function reconnectOpenCodeGo(label) {
   win.loadURL(startUrl).catch(() => {
     /* surfaced through the page itself */
   });
+
+  // OAuth providers (e.g. Google) can drop the connection on an unstable proxy.
+  // Retry the navigation a few times before giving up.
+  let loadRetries = 0;
+  const MAX_LOAD_RETRIES = 4;
+  win.webContents.on("did-fail-load", (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || settled) return;
+    if (errorCode === -3) return; // ERR_ABORTED: normal navigation cancel
+    if (loadRetries >= MAX_LOAD_RETRIES) return;
+    loadRetries += 1;
+    const target = validatedURL || startUrl;
+    setTimeout(() => {
+      if (!win.isDestroyed() && !settled) win.loadURL(target).catch(() => {});
+    }, 1200 * loadRetries);
+  });
+
   timer = setInterval(attempt, 2000);
   win.webContents.on("did-navigate", () => attempt());
   win.webContents.on("did-navigate-in-page", () => attempt());
