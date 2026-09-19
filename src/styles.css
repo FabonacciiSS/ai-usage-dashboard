@@ -295,6 +295,18 @@ button.secondary:hover {
   white-space: nowrap;
 }
 
+.heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+button.small {
+  padding: 5px 11px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+
 .account-pill.connected {
   color: var(--good);
   background: var(--good-soft);

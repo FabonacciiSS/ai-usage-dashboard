@@ -26,19 +26,13 @@ npm install
 npm start
 ```
 
-## OpenCode Go 会话绑定（仅首次）
+## OpenCode Go 登录（首次或过期后）
 
-OpenCode Go 用量页面需要登录态，且一次只能登录一个账号。首次绑定时用 Tabbit 等浏览器登录 opencode.ai 并打开对应 workspace 的 go 页面，取得登录 cookie 后加密导入：
+OpenCode Go 用量页面需要登录态。在对应账号卡片右上角点击 **Reconnect**，会弹出一个应用内登录窗口，用该账号完成登录即可——应用会自动抓取并加密保存会话，窗口随后关闭。
 
-```powershell
-# 环境变量指定当前要导入的账号
-$env:OPENCODE_GO_IMPORT_LABEL = "github"      # 或 "gmail"
-$env:OPENCODE_GO_WORKSPACE_ID = "wrk_xxx"
-$env:OPENCODE_GO_COOKIE_FILE = "C:\path\to\cookie.txt"
-npm start
-```
+两个账号使用相互独立的登录环境，因此可以同时保持登录，不受"浏览器一次只能登录一个账号"的限制。
 
-会话使用 Windows 凭据加密（DPAPI）保存在本机 userData，明文 cookie 导入后立即删除。日常同步不再需要打开浏览器；只有会话过期时才需重新绑定。
+会话使用 Windows 凭据加密（DPAPI）仅保存在本机；登录窗口的内部分区也只用于维持该账号登录。会话过期时重复点击 Reconnect 即可，无需命令行操作。
 
 ## 数据隐私
 

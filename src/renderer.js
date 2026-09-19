@@ -18,6 +18,8 @@ const els = {
   goGmailAccount: document.querySelector("#goGmailAccount"),
   goGmailWindows: document.querySelector("#goGmailWindows"),
   goGmailEmpty: document.querySelector("#goGmailEmpty"),
+  goGithubReconnect: document.querySelector("#goGithubReconnect"),
+  goGmailReconnect: document.querySelector("#goGmailReconnect"),
   codexSourceStatus: document.querySelector("#codexSourceStatus"),
   car360SourceStatus: document.querySelector("#car360SourceStatus"),
   deepseekSourceStatus: document.querySelector("#deepseekSourceStatus"),
@@ -277,6 +279,23 @@ async function syncAll() {
 }
 
 els.syncAllButton.addEventListener("click", syncAll);
+
+async function reconnectAccount(label, button) {
+  if (!window.usageBridge?.reconnectOpenCodeGo) return;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "Waiting for sign-in…";
+  try {
+    const result = await window.usageBridge.reconnectOpenCodeGo({ label });
+    if (result?.ok) await syncAll();
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+els.goGithubReconnect?.addEventListener("click", () => reconnectAccount("github", els.goGithubReconnect));
+els.goGmailReconnect?.addEventListener("click", () => reconnectAccount("gmail", els.goGmailReconnect));
 
 const THEME_CYCLE = ["system", "light", "dark"];
 let themeMode = "system";

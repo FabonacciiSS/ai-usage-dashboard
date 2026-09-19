@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, safeStorage } = require("electron");
+const { app, BrowserWindow, ipcMain, nativeTheme, safeStorage, session } = require("electron");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
@@ -122,6 +122,97 @@ async function getOpenCodeGoUsage(label) {
     return { ok: false, needsLogin: true, error: "OpenCode Go session expired or usage page changed" };
   }
   return { ok: true, generatedAt: new Date().toISOString(), workspaceId: record.workspaceId, ...usage };
+}
+
+const RECONNECT_COOKIE_HEADERS = {
+  Accept: "text/html,application/xhtml+xml",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+};
+
+async function verifyOpenCodeSession(authValue, workspaceId) {
+  const response = await fetch(`${OPENCODE_GO_BASE_URL}/workspace/${workspaceId}/go`, {
+    headers: { Cookie: `oc_locale=en; auth=${authValue}`, ...RECONNECT_COOKIE_HEADERS },
+    redirect: "follow"
+  });
+  const html = await response.text();
+  const usage = parseOpenCodeUsage(html);
+  if (!response.ok || !usage.rolling || !usage.weekly || !usage.monthly) return null;
+  return usage;
+}
+
+// Opens an in-app login window. Each account uses its own persistent session
+// partition so both can stay signed in at the same time, unlike a single browser.
+function reconnectOpenCodeGo(label) {
+  return new Promise((resolve) => {
+    const partition = `persist:opencode-go-${label}`;
+    const ses = session.fromPartition(partition);
+    const store = readSessionStore();
+    const knownWorkspace = store[label]?.workspaceId || null;
+    const startUrl = knownWorkspace
+      ? `${OPENCODE_GO_BASE_URL}/workspace/${knownWorkspace}/go`
+      : `${OPENCODE_GO_BASE_URL}/console/login`;
+
+    const win = new BrowserWindow({
+      width: 560,
+      height: 760,
+      title: `Sign in to OpenCode Go · ${label}`,
+      autoHideMenuBar: true,
+      backgroundColor: nativeTheme.shouldUseDarkColors ? "#111418" : "#f6f7f9",
+      webPreferences: { partition, contextIsolation: true, nodeIntegration: false }
+    });
+    win.loadURL(startUrl);
+
+    let settled = false;
+    let timer = null;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearInterval(timer);
+      resolve(result);
+    };
+
+    async function attempt() {
+      if (settled) return;
+      try {
+        const cookies = await ses.cookies.get({ name: "auth" });
+        const auth = cookies.find((cookie) => (cookie.domain || "").endsWith("opencode.ai"));
+        if (!auth) return;
+
+        let workspaceId = knownWorkspace;
+        const match = win.webContents.getURL().match(/\/workspace\/(wrk_[A-Za-z0-9]+)/);
+        if (match) workspaceId = match[1];
+        if (!workspaceId) return;
+
+        const usage = await verifyOpenCodeSession(auth.value, workspaceId);
+        if (!usage) return;
+        if (!safeStorage.isEncryptionAvailable()) {
+          finish({ ok: false, error: "System credential encryption is unavailable" });
+          return;
+        }
+
+        const next = readSessionStore();
+        next[label] = {
+          workspaceId,
+          auth: safeStorage.encryptString(auth.value).toString("base64"),
+          importedAt: new Date().toISOString()
+        };
+        writeSessionStore(next);
+        finish({ ok: true, workspaceId, email: usage.email || null });
+        if (!win.isDestroyed()) win.close();
+      } catch {
+        /* keep waiting until the user finishes signing in */
+      }
+    }
+
+    timer = setInterval(attempt, 2000);
+    win.webContents.on("did-navigate", () => attempt());
+    win.webContents.on("did-navigate-in-page", () => attempt());
+    win.webContents.on("did-finish-load", () => attempt());
+
+    win.on("closed", () => finish({ ok: false, canceled: true }));
+  });
 }
 
 async function getDeepSeekBalance() {
@@ -502,4 +593,12 @@ ipcMain.handle("deepseek:getBalance", async () => getDeepSeekBalance());
 
 ipcMain.handle("opencode-go:getUsage", async (event, payload = {}) => {
   return getOpenCodeGoUsage(payload.label);
+});
+
+ipcMain.handle("opencode-go:reconnect", async (event, payload = {}) => {
+  const label = payload.label;
+  if (!["github", "gmail"].includes(label)) {
+    return { ok: false, error: "Unknown account label" };
+  }
+  return reconnectOpenCodeGo(label);
 });
