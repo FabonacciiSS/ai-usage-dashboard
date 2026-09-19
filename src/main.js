@@ -75,70 +75,106 @@ function importOpenCodeGoSessionFromEnvironment() {
   fs.rmSync(cookieFile, { force: true });
 }
 
-function parseOpenCodeUsage(html) {
-  function parseWindow(name) {
-    const re = new RegExp(`${name}:\\$R\\[\\d+\\]=\\{status:\"([^\"]+)\",resetInSec:(\\d+),usagePercent:([\\d.]+),usage:(\\d+),limit:(\\d+)\\}`);
-    const match = html.match(re);
-    if (!match) return null;
-    return {
-      status: match[1],
-      resetInSec: Number(match[2]),
-      usagePercent: Number(match[3]),
-      usage: Number(match[4]),
-      limit: Number(match[5])
-    };
-  }
-  const email = html.match(/userEmail\[[^\]]+\][\s\S]*?\$R\[28\]\(\$R\[1\],\"([^\"]+)\"\)/)?.[1] || null;
-  return {
-    email,
-    rolling: parseWindow("rollingUsage"),
-    weekly: parseWindow("weeklyUsage"),
-    monthly: parseWindow("monthlyUsage")
+function parseGoStatus(data) {
+  const meters = data?.access?.meters || {};
+  const now = Date.now();
+  const pct = (meter) => {
+    const limit = Number(meter?.limitMicroCents) || 0;
+    const usage = Number(meter?.usedMicroCents) || 0;
+    return { usagePercent: limit > 0 ? (usage / limit) * 100 : 0, usage, limit };
   };
+  const resetIn = (iso) => {
+    if (!iso) return null;
+    const diff = Math.round((new Date(iso).getTime() - now) / 1000);
+    return diff > 0 ? diff : 0;
+  };
+  const rolling = pct(meters.fiveHour);
+  const weekly = pct(meters.week);
+  const monthly = pct(meters.month);
+  return {
+    rolling: { ...rolling, resetInSec: resetIn(meters.fiveHour?.resetsAt) },
+    weekly: { ...weekly, resetInSec: resetIn(meters.week?.resetsAt) },
+    monthly: {
+      ...monthly,
+      resetInSec: resetIn(meters.month?.resetsAt) ?? resetIn(data?.access?.endsAt)
+    }
+  };
+}
+
+function openCodeGoSession(label) {
+  return session.fromPartition(`persist:opencode-go-${label}`);
+}
+
+async function fetchGoStatus(ses, workspaceId) {
+  const response = await ses.fetch("https://opencode.ai/console/api/go/status", {
+    headers: { Accept: "application/json", "x-org-id": workspaceId }
+  });
+  if (response.status === 401 || response.status === 403) return { needsLogin: true };
+  if (!response.ok) return { error: `Gateway usage request failed (${response.status})` };
+  const data = await response.json().catch(() => null);
+  if (!data?.access?.meters) return { error: "Unexpected Go status response" };
+  return { data };
 }
 
 async function getOpenCodeGoUsage(label) {
   const record = readSessionStore()[label];
-  if (!record) return { ok: false, needsLogin: true, error: "Account session not imported" };
-  let cookie;
-  try {
-    cookie = safeStorage.decryptString(Buffer.from(record.auth, "base64"));
-  } catch {
-    return { ok: false, needsLogin: true, error: "Saved session could not be decrypted" };
+  if (!record?.workspaceId) {
+    return { ok: false, needsLogin: true, error: "Account session not imported" };
   }
-  const url = `${OPENCODE_GO_BASE_URL}/workspace/${record.workspaceId}/go`;
-  const response = await fetch(url, {
-    headers: {
-      Cookie: `oc_locale=en; auth=${cookie}`,
-      Accept: "text/html,application/xhtml+xml",
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    },
-    redirect: "follow"
-  });
-  const html = await response.text();
-  const usage = parseOpenCodeUsage(html);
-  if (!response.ok || !usage.rolling || !usage.weekly || !usage.monthly) {
-    return { ok: false, needsLogin: true, error: "OpenCode Go session expired or usage page changed" };
+  const ses = openCodeGoSession(label);
+
+  // Restore the login into this session partition if it was cleared.
+  const existing = await ses.cookies.get({ name: "auth" });
+  if (!existing.length && record.auth) {
+    try {
+      const value = safeStorage.decryptString(Buffer.from(record.auth, "base64"));
+      await ses.cookies.set({ url: "https://opencode.ai/", name: "auth", value, httpOnly: true });
+    } catch {
+      /* ignore, request will report login needed */
+    }
   }
-  return { ok: true, generatedAt: new Date().toISOString(), workspaceId: record.workspaceId, ...usage };
+
+  const result = await fetchGoStatus(ses, record.workspaceId);
+  if (result.needsLogin) {
+    return { ok: false, needsLogin: true, error: "OpenCode Go session expired" };
+  }
+  if (result.error) return { ok: false, needsLogin: true, error: result.error };
+
+  const sessionInfo = await ses
+    .fetch("https://opencode.ai/console/auth/session", { headers: { Accept: "application/json" } })
+    .then((res) => (res.ok ? res.json() : null))
+    .catch(() => null);
+
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    workspaceId: record.workspaceId,
+    email: sessionInfo?.user?.email || null,
+    ...parseGoStatus(result.data)
+  };
 }
 
-const RECONNECT_COOKIE_HEADERS = {
-  Accept: "text/html,application/xhtml+xml",
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-};
-
-async function verifyOpenCodeSession(authValue, workspaceId) {
-  const response = await fetch(`${OPENCODE_GO_BASE_URL}/workspace/${workspaceId}/go`, {
-    headers: { Cookie: `oc_locale=en; auth=${authValue}`, ...RECONNECT_COOKIE_HEADERS },
-    redirect: "follow"
-  });
-  const html = await response.text();
-  const usage = parseOpenCodeUsage(html);
-  if (!response.ok || !usage.rolling || !usage.weekly || !usage.monthly) return null;
-  return usage;
+async function verifyOpenCodeSession(ses, workspaceId) {
+  try {
+    const orgsResponse = await ses.fetch("https://opencode.ai/console/api/orgs", {
+      headers: { Accept: "application/json" }
+    });
+    if (orgsResponse.ok) {
+      const list = await orgsResponse.json().catch(() => []);
+      const orgs = Array.isArray(list) ? list : list?.orgs || [];
+      const match = orgs.find((org) => org?.id === workspaceId) || orgs[0];
+      if (match?.id) workspaceId = match.id;
+    }
+  } catch {
+    /* fall back to the known workspace id */
+  }
+  const result = await fetchGoStatus(ses, workspaceId);
+  if (!result.data) return null;
+  const sessionInfo = await ses
+    .fetch("https://opencode.ai/console/auth/session", { headers: { Accept: "application/json" } })
+    .then((res) => (res.ok ? res.json() : null))
+    .catch(() => null);
+  return { workspaceId, usage: parseGoStatus(result.data), email: sessionInfo?.user?.email || null };
 }
 
 // Opens an in-app login window. Each account uses its own persistent session
@@ -150,18 +186,22 @@ function reconnectOpenCodeGo(label) {
     const store = readSessionStore();
     const knownWorkspace = store[label]?.workspaceId || null;
     const startUrl = knownWorkspace
-      ? `${OPENCODE_GO_BASE_URL}/workspace/${knownWorkspace}/go`
-      : `${OPENCODE_GO_BASE_URL}/console/login`;
+      ? `${OPENCODE_GO_BASE_URL}/console/${knownWorkspace}/go`
+      : `${OPENCODE_GO_BASE_URL}/console`;
 
     const win = new BrowserWindow({
-      width: 560,
-      height: 760,
+      width: 640,
+      height: 780,
       title: `Sign in to OpenCode Go · ${label}`,
       autoHideMenuBar: true,
       backgroundColor: nativeTheme.shouldUseDarkColors ? "#111418" : "#f6f7f9",
       webPreferences: { partition, contextIsolation: true, nodeIntegration: false }
     });
     win.loadURL(startUrl);
+    win.once("ready-to-show", () => {
+      win.show();
+      win.focus();
+    });
 
     let settled = false;
     let timer = null;
@@ -180,13 +220,8 @@ function reconnectOpenCodeGo(label) {
         const auth = cookies.find((cookie) => (cookie.domain || "").endsWith("opencode.ai"));
         if (!auth) return;
 
-        let workspaceId = knownWorkspace;
-        const match = win.webContents.getURL().match(/\/workspace\/(wrk_[A-Za-z0-9]+)/);
-        if (match) workspaceId = match[1];
-        if (!workspaceId) return;
-
-        const usage = await verifyOpenCodeSession(auth.value, workspaceId);
-        if (!usage) return;
+        const verified = await verifyOpenCodeSession(ses, knownWorkspace);
+        if (!verified) return;
         if (!safeStorage.isEncryptionAvailable()) {
           finish({ ok: false, error: "System credential encryption is unavailable" });
           return;
@@ -194,12 +229,12 @@ function reconnectOpenCodeGo(label) {
 
         const next = readSessionStore();
         next[label] = {
-          workspaceId,
+          workspaceId: verified.workspaceId,
           auth: safeStorage.encryptString(auth.value).toString("base64"),
           importedAt: new Date().toISOString()
         };
         writeSessionStore(next);
-        finish({ ok: true, workspaceId, email: usage.email || null });
+        finish({ ok: true, workspaceId: verified.workspaceId, email: verified.email });
         if (!win.isDestroyed()) win.close();
       } catch {
         /* keep waiting until the user finishes signing in */

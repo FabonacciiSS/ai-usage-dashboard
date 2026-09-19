@@ -182,6 +182,10 @@ function renderDeepSeek() {
 
 function renderGoWindow(entry, label) {
   const percent = Number(entry.usagePercent) || 0;
+  const resetText =
+    entry.resetInSec === null || entry.resetInSec === undefined
+      ? "no active window"
+      : `resets in ${formatDuration(entry.resetInSec)}`;
   const element = document.createElement("div");
   element.className = "usage-window";
   element.innerHTML = `
@@ -190,7 +194,7 @@ function renderGoWindow(entry, label) {
       <strong>${percent.toFixed(1)}%</strong>
     </div>
     <div class="progress"><span data-tone="${tone(percent)}" style="width:${clamp(percent, 0, 100)}%"></span></div>
-    <div class="row-meta"><span class="amount">${formatCompactNumber(entry.usage)}</span> <span class="divider">/</span> <span class="amount">${formatCompactNumber(entry.limit)}</span> · resets in ${formatDuration(entry.resetInSec)}</div>
+    <div class="row-meta"><span class="amount">${formatCompactNumber(entry.usage)}</span> <span class="divider">/</span> <span class="amount">${formatCompactNumber(entry.limit)}</span> · ${resetText}</div>
   `;
   return element;
 }
