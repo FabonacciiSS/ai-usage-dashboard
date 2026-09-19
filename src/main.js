@@ -179,75 +179,108 @@ async function verifyOpenCodeSession(ses, workspaceId) {
 
 // Opens an in-app login window. Each account uses its own persistent session
 // partition so both can stay signed in at the same time, unlike a single browser.
+const reconnectWindows = new Map();
+
 function reconnectOpenCodeGo(label) {
-  return new Promise((resolve) => {
-    const partition = `persist:opencode-go-${label}`;
-    const ses = session.fromPartition(partition);
-    const store = readSessionStore();
-    const knownWorkspace = store[label]?.workspaceId || null;
-    const startUrl = knownWorkspace
-      ? `${OPENCODE_GO_BASE_URL}/console/${knownWorkspace}/go`
-      : `${OPENCODE_GO_BASE_URL}/console`;
+  const active = reconnectWindows.get(label);
+  if (active && !active.win.isDestroyed()) {
+    if (active.win.isMinimized()) active.win.restore();
+    active.win.show();
+    active.win.focus();
+    return active.promise;
+  }
 
-    const win = new BrowserWindow({
-      width: 640,
-      height: 780,
-      title: `Sign in to OpenCode Go · ${label}`,
-      autoHideMenuBar: true,
-      backgroundColor: nativeTheme.shouldUseDarkColors ? "#111418" : "#f6f7f9",
-      webPreferences: { partition, contextIsolation: true, nodeIntegration: false }
-    });
-    win.loadURL(startUrl);
-    win.once("ready-to-show", () => {
-      win.show();
-      win.focus();
-    });
+  const partition = `persist:opencode-go-${label}`;
+  const ses = session.fromPartition(partition);
+  const store = readSessionStore();
+  const knownWorkspace = store[label]?.workspaceId || null;
+  const startUrl = knownWorkspace
+    ? `${OPENCODE_GO_BASE_URL}/console/${knownWorkspace}/go`
+    : `${OPENCODE_GO_BASE_URL}/console`;
 
-    let settled = false;
-    let timer = null;
-
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearInterval(timer);
-      resolve(result);
-    };
-
-    async function attempt() {
-      if (settled) return;
-      try {
-        const cookies = await ses.cookies.get({ name: "auth" });
-        const auth = cookies.find((cookie) => (cookie.domain || "").endsWith("opencode.ai"));
-        if (!auth) return;
-
-        const verified = await verifyOpenCodeSession(ses, knownWorkspace);
-        if (!verified) return;
-        if (!safeStorage.isEncryptionAvailable()) {
-          finish({ ok: false, error: "System credential encryption is unavailable" });
-          return;
-        }
-
-        const next = readSessionStore();
-        next[label] = {
-          workspaceId: verified.workspaceId,
-          auth: safeStorage.encryptString(auth.value).toString("base64"),
-          importedAt: new Date().toISOString()
-        };
-        writeSessionStore(next);
-        finish({ ok: true, workspaceId: verified.workspaceId, email: verified.email });
-        if (!win.isDestroyed()) win.close();
-      } catch {
-        /* keep waiting until the user finishes signing in */
-      }
-    }
-
-    timer = setInterval(attempt, 2000);
-    win.webContents.on("did-navigate", () => attempt());
-    win.webContents.on("did-navigate-in-page", () => attempt());
-    win.webContents.on("did-finish-load", () => attempt());
-
-    win.on("closed", () => finish({ ok: false, canceled: true }));
+  const win = new BrowserWindow({
+    width: 700,
+    height: 820,
+    show: false,
+    title: `Sign in to OpenCode Go · ${label}`,
+    autoHideMenuBar: true,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#111418" : "#f6f7f9",
+    webPreferences: { partition, contextIsolation: true, nodeIntegration: false }
   });
+
+  let resolvePromise = null;
+  const promise = new Promise((resolve) => {
+    resolvePromise = resolve;
+  });
+
+  let settled = false;
+  let timer = null;
+  let shownFallback = null;
+
+  const showWindow = () => {
+    if (win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  };
+
+  const cleanup = () => {
+    if (timer) clearInterval(timer);
+    if (shownFallback) clearTimeout(shownFallback);
+    reconnectWindows.delete(label);
+  };
+
+  const finish = (result) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    resolvePromise(result);
+  };
+
+  async function attempt() {
+    if (settled) return;
+    try {
+      const cookies = await ses.cookies.get({ name: "auth" });
+      const auth = cookies.find((cookie) => (cookie.domain || "").endsWith("opencode.ai"));
+      if (!auth) return;
+
+      const verified = await verifyOpenCodeSession(ses, knownWorkspace);
+      if (!verified) return;
+      if (!safeStorage.isEncryptionAvailable()) {
+        finish({ ok: false, error: "System credential encryption is unavailable" });
+        return;
+      }
+
+      const next = readSessionStore();
+      next[label] = {
+        workspaceId: verified.workspaceId,
+        auth: safeStorage.encryptString(auth.value).toString("base64"),
+        importedAt: new Date().toISOString()
+      };
+      writeSessionStore(next);
+      finish({ ok: true, workspaceId: verified.workspaceId, email: verified.email });
+      if (!win.isDestroyed()) win.close();
+    } catch {
+      /* keep waiting until the user finishes signing in */
+    }
+  }
+
+  win.once("ready-to-show", showWindow);
+  shownFallback = setTimeout(showWindow, 2500);
+  win.loadURL(startUrl).catch(() => {
+    /* surfaced through the page itself */
+  });
+  timer = setInterval(attempt, 2000);
+  win.webContents.on("did-navigate", () => attempt());
+  win.webContents.on("did-navigate-in-page", () => attempt());
+  win.webContents.on("did-finish-load", () => attempt());
+  win.on("closed", () => {
+    cleanup();
+    finish({ ok: false, canceled: true });
+  });
+
+  reconnectWindows.set(label, { win, promise });
+  return promise;
 }
 
 async function getDeepSeekBalance() {
