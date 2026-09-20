@@ -174,8 +174,18 @@ button.secondary:hover {
 }
 
 .summary-grid {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   margin-bottom: 14px;
+}
+
+/* Three cards on the first row, two wider cards on the second row. */
+.summary-grid .metric-card {
+  grid-column: span 2;
+}
+
+.summary-grid .metric-card:nth-child(4),
+.summary-grid .metric-card:nth-child(5) {
+  grid-column: span 3;
 }
 
 .metric-card {
@@ -431,6 +441,11 @@ button.small {
 @media (max-width: 1040px) {
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .summary-grid .metric-card,
+  .summary-grid .metric-card:nth-child(4),
+  .summary-grid .metric-card:nth-child(5) {
+    grid-column: auto;
   }
   .status-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
