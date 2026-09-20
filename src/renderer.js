@@ -12,6 +12,8 @@ const els = {
   car360Remaining: document.querySelector("#car360Remaining"),
   deepseekBalance: document.querySelector("#deepseekBalance"),
   deepseekStatus: document.querySelector("#deepseekStatus"),
+  zenBalance: document.querySelector("#zenBalance"),
+  zenStatus: document.querySelector("#zenStatus"),
   goGithubAccount: document.querySelector("#goGithubAccount"),
   goGithubWindows: document.querySelector("#goGithubWindows"),
   goGithubEmpty: document.querySelector("#goGithubEmpty"),
@@ -23,6 +25,7 @@ const els = {
   codexSourceStatus: document.querySelector("#codexSourceStatus"),
   car360SourceStatus: document.querySelector("#car360SourceStatus"),
   deepseekSourceStatus: document.querySelector("#deepseekSourceStatus"),
+  zenSourceStatus: document.querySelector("#zenSourceStatus"),
   goGithubSourceStatus: document.querySelector("#goGithubSourceStatus"),
   goGmailSourceStatus: document.querySelector("#goGmailSourceStatus"),
   updatedAt: document.querySelector("#updatedAt"),
@@ -180,6 +183,21 @@ function renderDeepSeek() {
   els.deepseekSourceStatus.className = snapshot.data.is_available ? "status-good" : "status-danger";
 }
 
+function renderZen() {
+  const snapshot = state.zen;
+  if (!snapshot?.ok) {
+    els.zenBalance.textContent = "--";
+    els.zenStatus.textContent = snapshot?.needsLogin ? "Gmail login needed" : snapshot?.error || "Unavailable";
+    els.zenSourceStatus.textContent = snapshot?.needsLogin ? "Login needed" : "Unavailable";
+    els.zenSourceStatus.className = "status-warn";
+    return;
+  }
+  els.zenBalance.innerHTML = `<span class="nowrap">${formatCompactCurrency(snapshot.balanceUsd, "USD")}</span>`;
+  els.zenStatus.textContent = snapshot.mode === "pay-as-you-go" ? "Pay-as-you-go" : "Prepaid balance";
+  els.zenSourceStatus.textContent = `Synced ${formatDateTime(snapshot.generatedAt)}`;
+  els.zenSourceStatus.className = "status-good";
+}
+
 function renderGoWindow(entry, label) {
   const percent = Number(entry.usagePercent) || 0;
   const resetText =
@@ -226,6 +244,7 @@ function render() {
   renderCodex();
   renderCar360();
   renderDeepSeek();
+  renderZen();
   renderGoAccount("Github", state.goGithub, els.goGithubAccount, els.goGithubWindows, els.goGithubEmpty, els.goGithubSourceStatus);
   renderGoAccount("Gmail", state.goGmail, els.goGmailAccount, els.goGmailWindows, els.goGmailEmpty, els.goGmailSourceStatus);
   els.updatedAt.textContent = state.updatedAt ? `Updated ${formatDateTime(state.updatedAt)}` : "Waiting for sync";
@@ -236,10 +255,11 @@ async function syncAll() {
   els.syncAllButton.disabled = true;
   els.syncAllButton.textContent = "Syncing...";
   try {
-    const [codex, car360, deepseek, goGithub, goGmail] = await Promise.all([
+    const [codex, car360, deepseek, zen, goGithub, goGmail] = await Promise.all([
       window.usageBridge.getCodexUsageSnapshot({ force: true }),
       window.usageBridge.getCar360UsageSnapshot({ force: true }),
       window.usageBridge.getDeepSeekBalance(),
+      window.usageBridge.getZenBalance(),
       window.usageBridge.getOpenCodeGoUsage({ label: "github" }),
       window.usageBridge.getOpenCodeGoUsage({ label: "gmail" })
     ]);
@@ -269,7 +289,8 @@ async function syncAll() {
     state = {
       codex: keepLastSuccess(state.codex, codex),
       car360: keepCurrentDayGateway(state.car360, car360),
-      deepseek,
+      deepseek: keepLastSuccess(state.deepseek, deepseek),
+      zen: keepLastSuccess(state.zen, zen),
       goGithub,
       goGmail,
       updatedAt: new Date().toISOString()

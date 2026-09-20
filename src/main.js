@@ -116,23 +116,25 @@ async function fetchGoStatus(ses, workspaceId) {
   return { data };
 }
 
+async function ensureSessionCookie(label, ses, record) {
+  const existing = await ses.cookies.get({ name: "auth" });
+  if (!existing.length && record?.auth) {
+    try {
+      const value = safeStorage.decryptString(Buffer.from(record.auth, "base64"));
+      await ses.cookies.set({ url: "https://opencode.ai/", name: "auth", value, httpOnly: true });
+    } catch {
+      /* request will report login needed */
+    }
+  }
+}
+
 async function getOpenCodeGoUsage(label) {
   const record = readSessionStore()[label];
   if (!record?.workspaceId) {
     return { ok: false, needsLogin: true, error: "Account session not imported" };
   }
   const ses = openCodeGoSession(label);
-
-  // Restore the login into this session partition if it was cleared.
-  const existing = await ses.cookies.get({ name: "auth" });
-  if (!existing.length && record.auth) {
-    try {
-      const value = safeStorage.decryptString(Buffer.from(record.auth, "base64"));
-      await ses.cookies.set({ url: "https://opencode.ai/", name: "auth", value, httpOnly: true });
-    } catch {
-      /* ignore, request will report login needed */
-    }
-  }
+  await ensureSessionCookie(label, ses, record);
 
   const result = await fetchGoStatus(ses, record.workspaceId);
   if (result.needsLogin) {
@@ -151,6 +153,41 @@ async function getOpenCodeGoUsage(label) {
     workspaceId: record.workspaceId,
     email: sessionInfo?.user?.email || null,
     ...parseGoStatus(result.data)
+  };
+}
+
+// OpenCode Zen is a prepaid balance (pay-as-you-go), like DeepSeek, and shares
+// the Gmail account session.
+async function getOpenCodeZenBalance() {
+  const record = readSessionStore().gmail;
+  if (!record?.workspaceId) {
+    return { ok: false, needsLogin: true, error: "Gmail account session not available" };
+  }
+  const ses = openCodeGoSession("gmail");
+  await ensureSessionCookie("gmail", ses, record);
+
+  let response;
+  try {
+    response = await ses.fetch("https://opencode.ai/console/api/billing/status", {
+      headers: { Accept: "application/json", "x-org-id": record.workspaceId }
+    });
+  } catch (error) {
+    return { ok: false, error: `Zen balance request failed: ${error.message}` };
+  }
+  if (response.status === 401 || response.status === 403) {
+    return { ok: false, needsLogin: true, error: "Gmail session expired" };
+  }
+  if (!response.ok) {
+    return { ok: false, error: `Zen balance request failed (${response.status})` };
+  }
+  const data = await response.json().catch(() => null);
+  if (!data) return { ok: false, error: "Unexpected Zen balance response" };
+  const balanceUsd = Number(data.availableMicroCents || data.balanceMicroCents || 0) / 1e8;
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    balanceUsd,
+    mode: data.mode || data.billingMode || null
   };
 }
 
@@ -678,6 +715,8 @@ ipcMain.handle("deepseek:getBalance", async () => getDeepSeekBalance());
 ipcMain.handle("opencode-go:getUsage", async (event, payload = {}) => {
   return getOpenCodeGoUsage(payload.label);
 });
+
+ipcMain.handle("zen:getBalance", async () => getOpenCodeZenBalance());
 
 ipcMain.handle("opencode-go:reconnect", async (event, payload = {}) => {
   const label = payload.label;

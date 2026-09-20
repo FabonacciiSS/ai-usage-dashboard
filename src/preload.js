@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("usageBridge", {
   getCodexUsageSnapshot: (payload) => ipcRenderer.invoke("codex:getUsageSnapshot", payload),
   getCar360UsageSnapshot: (payload) => ipcRenderer.invoke("car360:getUsageSnapshot", payload),
   getDeepSeekBalance: () => ipcRenderer.invoke("deepseek:getBalance"),
+  getZenBalance: () => ipcRenderer.invoke("zen:getBalance"),
   getOpenCodeGoUsage: (payload) => ipcRenderer.invoke("opencode-go:getUsage", payload),
   reconnectOpenCodeGo: (payload) => ipcRenderer.invoke("opencode-go:reconnect", payload),
   getTheme: () => ipcRenderer.invoke("theme:get"),
