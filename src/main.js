@@ -7,10 +7,6 @@ const { execFile } = require("child_process");
 // Keep Electron's OS encryption key stable even when a diagnostic entry point is used.
 app.setPath("userData", path.join(app.getPath("appData"), "codex-usage-desktop-dashboard"));
 
-const OPENAI_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const OPENAI_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
-const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage";
-
 const CAR360_BASE_URL = "https://ai.car360.info";
 const CAR360_USAGE_URL = `${CAR360_BASE_URL}/v1/usage`;
 const OPENCODE_GO_BASE_URL = "https://opencode.ai";
@@ -445,33 +441,6 @@ function findOpenCodeAuthFile() {
   return null;
 }
 
-async function refreshOpenAIToken(refreshToken) {
-  const form = new URLSearchParams({
-    grant_type: "refresh_token",
-    client_id: OPENAI_OAUTH_CLIENT_ID,
-    redirect_uri: "https://openai.com/app",
-    refresh_token: refreshToken
-  });
-  const response = await fetch(OPENAI_OAUTH_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: form.toString()
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    return {
-      ok: false,
-      error: body.error?.message || body.error_description || `Token refresh failed (${response.status})`
-    };
-  }
-  return {
-    ok: true,
-    accessToken: body.access_token,
-    refreshToken: body.refresh_token,
-    expiresInSec: body.expires_in
-  };
-}
-
 let lastCodexSnapshot = null;
 const SNAPSHOT_TTL_MS = 60 * 1000;
 
@@ -501,63 +470,34 @@ async function getCodexUsageSnapshot({ force }) {
     return { ok: false, error: "No OpenAI OAuth credentials found in opencode auth.json." };
   }
 
-  let accessToken = auth.access;
-  let refreshed = false;
-
-  const expiresMs = Number(auth.expires || 0);
-  if (expiresMs - now < 60 * 1000 && auth.refresh) {
-    const refreshedToken = await refreshOpenAIToken(auth.refresh);
-    if (refreshedToken.ok) {
-      accessToken = refreshedToken.accessToken;
-      refreshed = true;
-      try {
-        const parsed = JSON.parse(fs.readFileSync(authFile, "utf8"));
-        parsed.openai = {
-          ...parsed.openai,
-          access: refreshedToken.accessToken,
-          refresh: refreshedToken.refreshToken || refreshedToken.accessToken,
-          expires: now + refreshedToken.expiresInSec * 1000
-        };
-        fs.writeFileSync(authFile, JSON.stringify(parsed, null, 2), "utf8");
-      } catch (error) {
-        return {
-          ok: false,
-          error: `Token refreshed but failed to persist: ${error.message}`
-        };
-      }
-    } else {
-      return {
-        ok: false,
-        error: `OpenAI OAuth refresh failed: ${refreshedToken.error}. Run 'opencode auth login' to re-authenticate.`
-      };
-    }
-  }
-
-  // chatgpt.com rejects Electron's TLS fingerprint (403). Route the request through
-  // a local Python helper, whose network stack passes the reverse-proxy check.
+  // Token refresh also runs inside the Python helper: OpenAI rejects Electron's
+  // region on the refresh call, but accepts the same request from Python.
+  let currentAuth = { ...auth };
   const helper = path.join(__dirname, "..", "scripts", "codex_pyfetch.py");
   const raw = await new Promise((resolve) => {
-    const child = execFile(
+    execFile(
       process.env.PYTHON || "python",
       [helper],
       {
         encoding: "utf8",
-        timeout: 30000,
-        env: { ...process.env, OPENAI_ACCESS_TOKEN: accessToken }
+        timeout: 45000,
+        env: {
+          ...process.env,
+          OPENAI_ACCESS_TOKEN: currentAuth.access,
+          OPENAI_REFRESH_TOKEN: currentAuth.refresh || "",
+          OPENAI_TOKEN_EXPIRES: String(currentAuth.expires || 0)
+        }
       },
-      (error, stdout, stderr) => {
+      (error, stdout) => {
         if (error) {
           resolve(JSON.stringify({ ok: false, error: `Python helper failed: ${error.message}` }));
           return;
         }
-        try {
-          resolve(stdout);
-        } catch {
-          resolve(JSON.stringify({ ok: false, error: "Python helper returned invalid output" }));
-        }
+        resolve(stdout);
       }
     );
   });
+
   let payload;
   try {
     payload = JSON.parse(raw);
@@ -565,11 +505,29 @@ async function getCodexUsageSnapshot({ force }) {
     return { ok: false, error: "Codex fetch helper returned invalid JSON" };
   }
 
+  if (payload.refreshed && payload.access) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(authFile, "utf8"));
+      parsed.openai = {
+        ...parsed.openai,
+        access: payload.access,
+        refresh: payload.refresh || parsed.openai.refresh,
+        expires: payload.expires || parsed.openai.expires
+      };
+      fs.writeFileSync(authFile, JSON.stringify(parsed, null, 2), "utf8");
+    } catch (error) {
+      return { ok: false, error: `Token refreshed but failed to persist: ${error.message}` };
+    }
+  }
+
   if (!payload.ok) {
+    const hint = payload.refreshFailed
+      ? " (token refresh failed; run 'opencode auth login' to re-authenticate)"
+      : "";
     return {
       ok: false,
       status: payload.status,
-      error: payload.error || "Codex usage request failed"
+      error: `${payload.error || "Codex usage request failed"}${hint}`
     };
   }
 
@@ -578,7 +536,7 @@ async function getCodexUsageSnapshot({ force }) {
     ok: true,
     generatedAt: new Date().toISOString(),
     generatedAtMs: now,
-    refreshed,
+    refreshed: Boolean(payload.refreshed),
     data: body
   };
   lastCodexSnapshot = { generatedAtMs: now, data };
