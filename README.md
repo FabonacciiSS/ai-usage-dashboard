@@ -27,13 +27,21 @@ npm install
 npm start
 ```
 
-## OpenCode Go 登录（首次或过期后）
+## OpenCode Go 与 Zen
 
-OpenCode Go 用量页面需要登录态。在对应账号卡片右上角点击 **Reconnect**，会弹出一个应用内登录窗口，用该账号完成登录即可——应用会自动抓取并加密保存会话，窗口随后关闭。
+OpenCode Go 用量通过 **API key** 读取，不依赖浏览器登录：
 
-两个账号使用相互独立的登录环境，因此可以同时保持登录，不受"浏览器一次只能登录一个账号"的限制。
+```dotenv
+# 两个账号各自的 service account / personal API key
+OPENCODE_GO_API_KEY_1=oc_sk_...
+OPENCODE_GO_API_KEY_2=oc_sk_...
+```
 
-会话使用 Windows 凭据加密（DPAPI）仅保存在本机；登录窗口的内部分区也只用于维持该账号登录。会话过期时重复点击 Reconnect 即可，无需命令行操作。
+放在项目 `.env`、上级目录 `.env` 或本机环境变量中均可（会按顺序合并读取）。
+
+**OpenCode Zen** 是充值余额制（用的同一个 Gmail 账号），它的余额接口只接受网页会话。Gmail 卡片右上角的 **Reconnect** 用于刷新该会话，登录一次后即可长期自动读取；会话过期时再点一次即可。
+
+> 说明：新版 OpenCode Console 把导航改为 Activity / Go / Models / Providers / Controls / Settings，并新增了 Service accounts（机器身份，用于 CI/自动化）、Go Teams 与 Extra Usage（额度用尽后使用余额）。Go 用量接口已支持 API key 直接调用，因此仪表盘不再需要为 Go 维护登录态。
 
 ## 数据隐私
 

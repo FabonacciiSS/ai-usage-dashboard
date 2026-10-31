@@ -13,23 +13,29 @@ const OPENCODE_GO_BASE_URL = "https://opencode.ai";
 
 function readDotEnv() {
   const result = {};
+  // Merge every candidate so a project .env and a parent workspace .env can
+  // both contribute keys. Earlier files win.
   const candidates = [
     process.env.USAGE_DASHBOARD_ENV_FILE,
     path.join(os.homedir(), ".env"),
-    path.join(__dirname, "..", ".env")
+    path.join(__dirname, "..", ".env"),
+    path.join(__dirname, "..", "..", ".env")
   ].filter(Boolean);
   for (const file of candidates) {
+    let content;
     try {
-      for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-        const separator = trimmed.indexOf("=");
-        if (separator < 1) continue;
-        result[trimmed.slice(0, separator).trim()] = trimmed.slice(separator + 1).trim();
-      }
-      return result;
+      content = fs.readFileSync(file, "utf8");
     } catch {
-      /* try next candidate */
+      continue;
+    }
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const separator = trimmed.indexOf("=");
+      if (separator < 1) continue;
+      const key = trimmed.slice(0, separator).trim();
+      if (key in result) continue;
+      result[key] = trimmed.slice(separator + 1).trim();
     }
   }
   return result;
@@ -101,15 +107,11 @@ function openCodeGoSession(label) {
   return session.fromPartition(`persist:opencode-go-${label}`);
 }
 
-async function fetchGoStatus(ses, workspaceId) {
-  const response = await ses.fetch("https://opencode.ai/console/api/go/status", {
-    headers: { Accept: "application/json", "x-org-id": workspaceId }
-  });
-  if (response.status === 401 || response.status === 403) return { needsLogin: true };
-  if (!response.ok) return { error: `Gateway usage request failed (${response.status})` };
-  const data = await response.json().catch(() => null);
-  if (!data?.access?.meters) return { error: "Unexpected Go status response" };
-  return { data };
+// OpenCode Go now exposes usage to service-account API keys directly, so the
+// two accounts no longer depend on a browser session.
+function readOpenCodeGoApiKey(label) {
+  const name = label === "gmail" ? "OPENCODE_GO_API_KEY_2" : "OPENCODE_GO_API_KEY_1";
+  return process.env[name] || readDotEnv()[name] || null;
 }
 
 async function ensureSessionCookie(label, ses, record) {
@@ -125,30 +127,38 @@ async function ensureSessionCookie(label, ses, record) {
 }
 
 async function getOpenCodeGoUsage(label) {
-  const record = readSessionStore()[label];
-  if (!record?.workspaceId) {
-    return { ok: false, needsLogin: true, error: "Account session not imported" };
+  const apiKey = readOpenCodeGoApiKey(label);
+  if (!apiKey) {
+    return {
+      ok: false,
+      needsLogin: true,
+      error: "OpenCode Go API key missing (set OPENCODE_GO_API_KEY_1 / _2)"
+    };
   }
-  const ses = openCodeGoSession(label);
-  await ensureSessionCookie(label, ses, record);
 
-  const result = await fetchGoStatus(ses, record.workspaceId);
-  if (result.needsLogin) {
-    return { ok: false, needsLogin: true, error: "OpenCode Go session expired" };
+  let response;
+  try {
+    response = await fetch("https://opencode.ai/console/api/go/status", {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" }
+    });
+  } catch (error) {
+    return { ok: false, error: `OpenCode Go request failed: ${error.message}` };
   }
-  if (result.error) return { ok: false, needsLogin: true, error: result.error };
-
-  const sessionInfo = await ses
-    .fetch("https://opencode.ai/console/auth/session", { headers: { Accept: "application/json" } })
-    .then((res) => (res.ok ? res.json() : null))
-    .catch(() => null);
+  if (response.status === 401 || response.status === 403) {
+    return { ok: false, needsLogin: true, error: "OpenCode Go API key invalid or revoked" };
+  }
+  if (!response.ok) {
+    return { ok: false, error: `OpenCode Go request failed (${response.status})` };
+  }
+  const data = await response.json().catch(() => null);
+  if (!data?.access?.meters) {
+    return { ok: false, error: "Unexpected Go status response" };
+  }
 
   return {
     ok: true,
     generatedAt: new Date().toISOString(),
-    workspaceId: record.workspaceId,
-    email: sessionInfo?.user?.email || null,
-    ...parseGoStatus(result.data)
+    ...parseGoStatus(data)
   };
 }
 
@@ -201,13 +211,21 @@ async function verifyOpenCodeSession(ses, workspaceId) {
   } catch {
     /* fall back to the known workspace id */
   }
-  const result = await fetchGoStatus(ses, workspaceId);
-  if (!result.data) return null;
+
+  // A signed-in session can read the workspace billing status; the one used by
+  // OpenCode Zen. This is what the reload path actually needs.
+  const billing = await ses
+    .fetch("https://opencode.ai/console/api/billing/status", {
+      headers: { Accept: "application/json", "x-org-id": workspaceId }
+    })
+    .catch(() => null);
+  if (!billing || !billing.ok) return null;
+
   const sessionInfo = await ses
     .fetch("https://opencode.ai/console/auth/session", { headers: { Accept: "application/json" } })
     .then((res) => (res.ok ? res.json() : null))
     .catch(() => null);
-  return { workspaceId, usage: parseGoStatus(result.data), email: sessionInfo?.user?.email || null };
+  return { workspaceId, email: sessionInfo?.user?.email || null };
 }
 
 // Opens an in-app login window. Each account uses its own persistent session
@@ -345,6 +363,19 @@ async function getDeepSeekBalance() {
 
 function findCar360ApiKey() {
   if (process.env.CAR360_API_KEY) return process.env.CAR360_API_KEY;
+  const env = readDotEnv();
+  if (env.CAR360_API_KEY) return env.CAR360_API_KEY;
+
+  // Legacy opencode/Codex config files that still carry the gateway key.
+  const legacyOpencode = path.join(__dirname, "..", "..", "car360-apikey-for-opencode.json");
+  try {
+    const parsed = JSON.parse(fs.readFileSync(legacyOpencode, "utf8"));
+    const key = parsed?.provider?.openai?.options?.apiKey;
+    if (key) return key;
+  } catch {
+    /* ignore */
+  }
+
   for (const p of [
     path.join(os.homedir(), ".codex", "auth.json"),
     path.join(os.homedir(), ".codex", "config.toml")
